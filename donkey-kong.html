@@ -1,0 +1,1712 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Donkey Kong</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;overflow:hidden;background:#000;display:flex;justify-content:center;align-items:center}
+canvas{display:block;image-rendering:pixelated;image-rendering:crisp-edges}
+#touchControls{display:none;position:fixed;bottom:0;left:0;right:0;height:140px;z-index:10;pointer-events:none}
+.touch-btn{position:absolute;width:60px;height:60px;border-radius:50%;background:rgba(255,255,255,0.15);border:2px solid rgba(255,255,255,0.3);pointer-events:all;display:flex;align-items:center;justify-content:center;font-size:24px;color:rgba(255,255,255,0.5);user-select:none;-webkit-user-select:none}
+.touch-btn:active{background:rgba(255,255,255,0.35)}
+#btnLeft{bottom:20px;left:20px}
+#btnRight{bottom:20px;left:100px}
+#btnUp{bottom:80px;left:60px}
+#btnDown{bottom:20px;left:60px}
+#btnJump{bottom:20px;right:20px;width:80px;font-size:16px}
+#btnHammer{bottom:80px;right:20px;width:70px;font-size:14px}
+@media(pointer:coarse){#touchControls{display:block}}
+</style>
+</head>
+<body>
+<canvas id="gameCanvas"></canvas>
+<div id="touchControls">
+<div class="touch-btn" id="btnLeft">&larr;</div>
+<div class="touch-btn" id="btnRight">&rarr;</div>
+<div class="touch-btn" id="btnUp">&uarr;</div>
+<div class="touch-btn" id="btnDown">&darr;</div>
+<div class="touch-btn" id="btnJump">A</div>
+<div class="touch-btn" id="btnHammer">H</div>
+</div>
+<script>
+"use strict";
+const canvas = document.getElementById("gameCanvas");
+const ctx = canvas.getContext("2d");
+const W = 640, H = 800;
+canvas.width = W; canvas.height = H;
+
+const GRAVITY = 0.42;
+const MAX_FALL = 11;
+const PLAYER_SPEED = 2.6;
+const PLAYER_JUMP = -7.8;
+const CLIMB_SPEED = 2.2;
+const BARREL_BASE_SPEED = 1.6;
+const BARREL_ROLL_MULT = 80;
+const FIREBALL_SPEED = 1.2;
+const HAMMER_DURATION = 600;
+
+function resize() {
+    const r = W / H;
+    let cw = window.innerWidth, ch = window.innerHeight;
+    if (cw / ch > r) cw = ch * r; else ch = cw / r;
+    canvas.style.width = cw + "px";
+    canvas.style.height = ch + "px";
+}
+window.addEventListener("resize", resize);
+resize();
+
+const COL = {
+    bg: "#000000",
+    girderTop: "#CC2200",
+    girderMid: "#AA1100",
+    girderBot: "#881100",
+    girderHighlight: "#EE4422",
+    ladderRail: "#DDAA33",
+    ladderRung: "#CC9922",
+    ladderRailDark: "#AA7722",
+    marioRed: "#E82020",
+    marioBlue: "#2040CC",
+    marioSkin: "#F8B878",
+    marioShoe: "#884400",
+    dkBrown: "#995522",
+    dkDarkBrown: "#663311",
+    dkTan: "#DDAA77",
+    dkFace: "#EEBB88",
+    paulinePink: "#EE5588",
+    paulineHair: "#EEBB33",
+    paulineShoe: "#CC3366",
+    barrelBody: "#CC8822",
+    barrelBand: "#3355BB",
+    barrelDark: "#996611",
+    barrelHighlight: "#EEAA44",
+    oilBody: "#222222",
+    oilLabel: "#CC3333",
+    oilRim: "#555555",
+    fireOrange: "#FF6600",
+    fireRed: "#EE2200",
+    fireYellow: "#FFCC00",
+    hammerHead: "#4488EE",
+    hammerHandle: "#996633",
+    hammerGlow: "#88CCFF",
+    white: "#FFFFFF",
+    scorePop: "#FFFF00",
+    textShadow: "#444444",
+    conveyor1: "#555555",
+    conveyor2: "#666666",
+    conveyorArrow: "#888888",
+    rivet: "#AABBCC",
+    rivetGlow: "#DDEEFF",
+    elevatorBody: "#666688",
+    elevatorDark: "#444466"
+};
+
+function removeDead(arr, pred) {
+    let w = 0;
+    for (let i = 0; i < arr.length; i++) {
+        if (pred(arr[i])) arr[w++] = arr[i];
+    }
+    arr.length = w;
+}
+
+const keys = {};
+const touchKeys = {};
+window.addEventListener("keydown", e => {
+    keys[e.code] = true;
+    if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Space","KeyZ","KeyX"].includes(e.code)) e.preventDefault();
+});
+window.addEventListener("keyup", e => { keys[e.code] = false; });
+
+function initTouch() {
+    const map = {
+        btnLeft: "ArrowLeft", btnRight: "ArrowRight",
+        btnUp: "ArrowUp", btnDown: "ArrowDown",
+        btnJump: "Space", btnHammer: "KeyZ"
+    };
+    for (const [id, code] of Object.entries(map)) {
+        const el = document.getElementById(id);
+        if (!el) continue;
+        el.addEventListener("touchstart", e => { e.preventDefault(); touchKeys[code] = true; });
+        el.addEventListener("touchend", e => { e.preventDefault(); touchKeys[code] = false; });
+        el.addEventListener("touchcancel", e => { touchKeys[code] = false; });
+    }
+}
+initTouch();
+
+function isKey(code) { return keys[code] || touchKeys[code]; }
+function isKeyJust(code) {
+    if ((keys[code] || touchKeys[code]) && !keys["_used_" + code]) {
+        keys["_used_" + code] = true;
+        return true;
+    }
+    return false;
+}
+function clearJust(code) { keys["_used_" + code] = false; }
+
+let audioCtx = null;
+function ensureAudio() {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === "suspended") audioCtx.resume();
+}
+
+let activeSounds = 0;
+const MAX_SOUNDS = 14;
+
+function playTone(freq, dur, type, vol, ramp) {
+    if (!audioCtx || activeSounds >= MAX_SOUNDS) return;
+    activeSounds++;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = type || "square";
+    osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+    if (ramp) osc.frequency.linearRampToValueAtTime(ramp, audioCtx.currentTime + dur);
+    gain.gain.setValueAtTime(vol || 0.08, audioCtx.currentTime);
+    gain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + dur);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + dur);
+    setTimeout(() => activeSounds--, dur * 1000 + 50);
+}
+
+function playNoise(dur, vol) {
+    if (!audioCtx || activeSounds >= MAX_SOUNDS) return;
+    activeSounds++;
+    const bufferSize = audioCtx.sampleRate * dur;
+    const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+    const src = audioCtx.createBufferSource();
+    src.buffer = buffer;
+    const gain = audioCtx.createGain();
+    gain.gain.setValueAtTime(vol || 0.08, audioCtx.currentTime);
+    gain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + dur);
+    src.connect(gain);
+    gain.connect(audioCtx.destination);
+    src.start();
+    setTimeout(() => activeSounds--, dur * 1000 + 50);
+}
+
+const SFX = {
+    jump() { playTone(300, 0.15, "square", 0.07, 600); },
+    land() { playNoise(0.05, 0.04); },
+    die() { playTone(400, 0.6, "square", 0.08, 80); },
+    barrelRoll() { playTone(60, 0.08, "triangle", 0.03); },
+    barrelSmash() { playNoise(0.2, 0.1); playTone(120, 0.15, "square", 0.06); },
+    hammerGrab() {
+        playTone(400, 0.1, "square", 0.07, 800);
+        setTimeout(() => playTone(600, 0.1, "square", 0.07, 1000), 100);
+        setTimeout(() => playTone(800, 0.15, "square", 0.07, 1200), 200);
+    },
+    hammerSmash() { playNoise(0.25, 0.12); playTone(80, 0.2, "sawtooth", 0.07); },
+    fireball() { playTone(200, 0.1, "sawtooth", 0.04, 100); },
+    score() { playTone(800, 0.08, "square", 0.06, 1200); },
+    levelComplete() {
+        [0,100,200,300,400].forEach((d, i) => {
+            setTimeout(() => playTone(400 + i * 150, 0.15, "square", 0.07), d);
+        });
+    },
+    gameOver() {
+        [0,200,400,600].forEach((d, i) => {
+            setTimeout(() => playTone(300 - i * 40, 0.3, "square", 0.07), d);
+        });
+    },
+    menuSelect() { playTone(600, 0.1, "square", 0.06, 900); },
+    climb() { playTone(250 + Math.random() * 50, 0.05, "triangle", 0.03); },
+    timeWarning() { playTone(800, 0.08, "square", 0.05); }
+};
+
+let gameState = "menu";
+let score = 0;
+let highScore = parseInt(localStorage.getItem("dkHS") || "0");
+let lives = 3;
+let currentLevel = 0;
+let frameCount = 0;
+let levelTimer = 0;
+let screenShake = 0;
+let transitionTimer = 0;
+let transitionType = "";
+let invincibleTimer = 0;
+let soundFrameCounter = 0;
+
+let platforms = [];
+let ladders = [];
+let barrels = [];
+let fireballs = [];
+let particles = [];
+let floatingTexts = [];
+let oilDrumObj = null;
+let player = null;
+let dk = null;
+let pauline = null;
+let hammerPickups = [];
+let conveyorBelts = [];
+let rivets = [];
+let elevators = [];
+
+function getPlatY(plat, x) {
+    return plat.y + (x - plat.x) * plat.slope;
+}
+
+function aabb(a, b) {
+    return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+function addFloatingText(x, y, text, color) {
+    floatingTexts.push({ x, y, text, color: color || COL.scorePop, life: 60, vy: -1.5 });
+}
+
+function addParticle(x, y, color, count) {
+    for (let i = 0; i < (count || 5); i++) {
+        particles.push({
+            x, y, vx: (Math.random() - 0.5) * 4, vy: (Math.random() - 0.5) * 4 - 1,
+            color, life: 20 + Math.random() * 20, size: 2 + Math.random() * 3
+        });
+    }
+}
+
+class Player {
+    constructor(x, y) {
+        this.x = x; this.y = y;
+        this.w = 20; this.h = 28;
+        this.vx = 0; this.vy = 0;
+        this.dir = 1;
+        this.onGround = false;
+        this.climbing = false;
+        this.currentLadder = null;
+        this.hasHammer = false;
+        this.hammerTimer = 0;
+        this.hammerAnim = 0;
+        this.dead = false;
+        this.deathTimer = 0;
+        this.animFrame = 0;
+        this.animTimer = 0;
+        this.walkCycle = 0;
+        this.jumpHeld = false;
+    }
+
+    update() {
+        if (this.dead) {
+            this.deathTimer--;
+            this.vy += GRAVITY * 0.5;
+            this.y += this.vy;
+            if (this.deathTimer <= 0) {
+                lives--;
+                if (lives <= 0) {
+                    gameState = "gameover";
+                    SFX.gameOver();
+                    if (score > highScore) {
+                        highScore = score;
+                        localStorage.setItem("dkHS", highScore.toString());
+                    }
+                } else {
+                    respawnPlayer();
+                }
+            }
+            return;
+        }
+
+        if (this.hasHammer) {
+            this.hammerTimer--;
+            this.hammerAnim += 0.3;
+            if (this.hammerTimer <= 0) {
+                this.hasHammer = false;
+            }
+        }
+
+        if (this.climbing) {
+            this.vy = 0;
+            this.vx = 0;
+            if (isKey("ArrowUp")) {
+                this.vy = -CLIMB_SPEED;
+                if (frameCount % 8 === 0) SFX.climb();
+            } else if (isKey("ArrowDown")) {
+                this.vy = CLIMB_SPEED;
+                if (frameCount % 8 === 0) SFX.climb();
+            }
+            this.y += this.vy;
+            if (this.currentLadder) {
+                this.x = this.currentLadder.x + this.currentLadder.w / 2 - this.w / 2;
+                const topY = this.currentLadder.y - this.h;
+                const botY = this.currentLadder.y + this.currentLadder.h - this.h;
+                if (this.y < topY) {
+                    this.y = topY;
+                    this.climbing = false;
+                    this.currentLadder = null;
+                    this.onGround = true;
+                } else if (this.y + this.h > botY + this.h) {
+                    this.y = botY;
+                    this.climbing = false;
+                    this.currentLadder = null;
+                    this.onGround = true;
+                }
+            }
+            if (isKeyJust("Space")) {
+                this.climbing = false;
+                this.currentLadder = null;
+                this.vy = PLAYER_JUMP * 0.6;
+                SFX.jump();
+            }
+            this.animTimer++;
+            if (this.animTimer > 8) { this.animTimer = 0; this.animFrame = (this.animFrame + 1) % 2; }
+            return;
+        }
+
+        let moveX = 0;
+        if (isKey("ArrowLeft")) moveX = -1;
+        if (isKey("ArrowRight")) moveX = 1;
+
+        if (moveX !== 0) {
+            this.vx = moveX * PLAYER_SPEED;
+            this.dir = moveX;
+            this.walkCycle += 0.2;
+        } else {
+            this.vx *= 0.7;
+            if (Math.abs(this.vx) < 0.1) this.vx = 0;
+            this.walkCycle = 0;
+        }
+
+        if (isKeyJust("Space") && this.onGround) {
+            this.vy = PLAYER_JUMP;
+            this.onGround = false;
+            SFX.jump();
+        }
+
+        if (!isKey("Space") && this.vy < -2) {
+            this.vy *= 0.85;
+        }
+
+        this.vy += GRAVITY;
+        if (this.vy > MAX_FALL) this.vy = MAX_FALL;
+
+        this.x += this.vx;
+        this.resolveX();
+        this.y += this.vy;
+        this.onGround = false;
+        this.resolveY();
+
+        if (this.x < 0) this.x = 0;
+        if (this.x + this.w > W) this.x = W - this.w;
+        if (this.y + this.h > H + 50) this.die();
+
+        for (const lad of ladders) {
+            if (this.x + this.w > lad.x && this.x < lad.x + lad.w) {
+                const ladTop = lad.y;
+                const ladBot = lad.y + lad.h;
+                const pBot = this.y + this.h;
+                if (pBot > ladTop - 4 && pBot < ladTop + 20 && isKey("ArrowUp")) {
+                    this.climbing = true;
+                    this.currentLadder = lad;
+                    this.y = ladTop - this.h;
+                    this.vy = 0;
+                    return;
+                }
+                if (pBot > ladBot - 10 && pBot < ladBot + 4 && isKey("ArrowDown")) {
+                    this.climbing = true;
+                    this.currentLadder = lad;
+                    this.y = ladBot - this.h;
+                    this.vy = 0;
+                    return;
+                }
+            }
+        }
+
+        this.animTimer++;
+        if (this.animTimer > 6) { this.animTimer = 0; this.animFrame = (this.animFrame + 1) % 2; }
+    }
+
+    resolveX() {
+        for (const p of platforms) {
+            if (p.type === "elevator" && p.moving) continue;
+            const my = this.y + this.h;
+            const py = getPlatY(p, this.x + this.w / 2);
+            if (my > p.y - 8 && my < py + 16 && this.x + this.w > p.x && this.x < p.x + p.width) {
+                if (this.vx > 0) this.x = p.x - this.w;
+                else if (this.vx < 0) this.x = p.x + p.width;
+            }
+        }
+    }
+
+    resolveY() {
+        for (const p of platforms) {
+            if (p.type === "elevator" && p.moving && !p.active) continue;
+            const surfY = getPlatY(p, this.x + this.w / 2);
+            const prevBot = this.y + this.h - this.vy;
+            const curBot = this.y + this.h;
+            if (this.x + this.w > p.x + 2 && this.x < p.x + p.width - 2) {
+                if (prevBot <= surfY + 4 && curBot >= surfY - 2 && this.vy >= 0) {
+                    this.y = surfY - this.h;
+                    this.vy = 0;
+                    this.onGround = true;
+                    if (p.moving) {
+                        this.y = surfY - this.h;
+                        if (p.moveDir) this.x += p.moveDir * (p.moveSpeed || 0);
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
+    die() {
+        if (this.dead || invincibleTimer > 0) return;
+        this.dead = true;
+        this.deathTimer = 90;
+        this.vy = -5;
+        this.vx = 0;
+        screenShake = 15;
+        SFX.die();
+    }
+
+    draw() {
+        if (this.dead && this.deathTimer % 4 < 2) return;
+        if (invincibleTimer > 0 && frameCount % 4 < 2) return;
+        ctx.save();
+        const dx = Math.round(this.x);
+        const dy = Math.round(this.y);
+
+        if (this.hasHammer) {
+            const swingAngle = Math.sin(this.hammerAnim) * 0.8;
+            ctx.save();
+            ctx.translate(dx + this.w / 2, dy + 4);
+            ctx.rotate(swingAngle);
+            ctx.fillStyle = COL.hammerHandle;
+            ctx.fillRect(-2, -16, 4, 18);
+            ctx.fillStyle = COL.hammerHead;
+            ctx.fillRect(-6, -20, 12, 6);
+            ctx.fillStyle = COL.hammerGlow;
+            ctx.fillRect(-4, -19, 8, 2);
+            ctx.restore();
+        }
+
+        ctx.scale(this.dir, 1);
+        const sx = this.dir === 1 ? dx : -dx - this.w;
+
+        ctx.fillStyle = COL.marioRed;
+        ctx.fillRect(sx + 4, dy, 12, 5);
+        ctx.fillRect(sx + 2, dy + 2, 16, 6);
+
+        ctx.fillStyle = COL.marioSkin;
+        ctx.fillRect(sx + 4, dy + 7, 10, 5);
+
+        ctx.fillStyle = COL.marioBlue;
+        ctx.fillRect(sx + 2, dy + 12, 16, 9);
+
+        ctx.fillStyle = COL.marioRed;
+        ctx.fillRect(sx + 2, dy + 12, 16, 3);
+
+        ctx.fillStyle = COL.marioSkin;
+        if (this.climbing) {
+            const armOff = this.animFrame === 0 ? -2 : 2;
+            ctx.fillRect(sx - 2, dy + 8 + armOff, 4, 8);
+            ctx.fillRect(sx + 18, dy + 8 - armOff, 4, 8);
+        } else {
+            ctx.fillRect(sx - 1, dy + 13, 4, 6);
+            ctx.fillRect(sx + 17, dy + 13, 4, 6);
+        }
+
+        ctx.fillStyle = COL.marioBlue;
+        if (!this.climbing && this.onGround && Math.abs(this.vx) > 0.5) {
+            const legOff = Math.sin(this.walkCycle * 6) * 3;
+            ctx.fillRect(sx + 3, dy + 21, 6, 4 + legOff);
+            ctx.fillRect(sx + 11, dy + 21, 6, 4 - legOff);
+        } else if (this.climbing) {
+            const legOff = this.animFrame === 0 ? 2 : -2;
+            ctx.fillRect(sx + 3, dy + 21 + legOff, 6, 5);
+            ctx.fillRect(sx + 11, dy + 21 - legOff, 6, 5);
+        } else {
+            ctx.fillRect(sx + 3, dy + 21, 6, 5);
+            ctx.fillRect(sx + 11, dy + 21, 6, 5);
+        }
+
+        ctx.fillStyle = COL.marioShoe;
+        if (!this.climbing) {
+            ctx.fillRect(sx + 2, dy + 25, 7, 3);
+            ctx.fillRect(sx + 11, dy + 25, 7, 3);
+        }
+
+        if (!this.onGround && !this.climbing && this.vy < 0) {
+            ctx.fillStyle = COL.marioSkin;
+            ctx.fillRect(sx + 1, dy + 10, 4, 3);
+            ctx.fillRect(sx + 15, dy + 10, 4, 3);
+        }
+
+        ctx.restore();
+    }
+}
+
+class DonkeyKong {
+    constructor(x, y) {
+        this.x = x; this.y = y;
+        this.state = "idle";
+        this.throwTimer = 120;
+        this.throwAnim = 0;
+        this.barrelCount = 0;
+        this.animFrame = 0;
+        this.holdingBarrel = true;
+        this.carryAnim = 0;
+    }
+
+    update() {
+        if (this.state === "idle") {
+            this.throwTimer--;
+            this.carryAnim += 0.02;
+            if (this.throwTimer <= 0) {
+                this.state = "throwing";
+                this.throwAnim = 0;
+                this.holdingBarrel = true;
+            }
+        } else if (this.state === "throwing") {
+            this.throwAnim += 0.15;
+            if (this.throwAnim > 1 && this.holdingBarrel) {
+                this.holdingBarrel = false;
+                spawnBarrel(this.x + 80, this.y + 30);
+                this.barrelCount++;
+            }
+            if (this.throwAnim > 2) {
+                this.state = "idle";
+                const interval = Math.max(80, 160 - currentLevel * 20 - this.barrelCount * 2);
+                this.throwTimer = interval + Math.random() * 60;
+            }
+        }
+        this.animFrame = Math.floor(frameCount / 15) % 2;
+    }
+
+    draw() {
+        ctx.save();
+        const dx = Math.round(this.x);
+        const dy = Math.round(this.y);
+
+        ctx.fillStyle = COL.dkBrown;
+        ctx.fillRect(dx + 5, dy + 15, 55, 45);
+        ctx.fillRect(dx + 10, dy, 40, 25);
+
+        ctx.fillStyle = COL.dkDarkBrown;
+        ctx.fillRect(dx + 8, dy + 18, 49, 39);
+        ctx.fillRect(dx + 13, dy + 3, 34, 19);
+
+        ctx.fillStyle = COL.dkFace;
+        ctx.fillRect(dx + 16, dy + 5, 28, 14);
+        ctx.fillRect(dx + 20, dy + 9, 8, 6);
+        ctx.fillRect(dx + 32, dy + 9, 8, 6);
+
+        ctx.fillStyle = "#000";
+        ctx.fillRect(dx + 22, dy + 10, 4, 4);
+        ctx.fillRect(dx + 34, dy + 10, 4, 4);
+
+        ctx.fillStyle = COL.dkFace;
+        ctx.fillRect(dx + 26, dy + 14, 8, 4);
+        ctx.fillStyle = "#000";
+        ctx.fillRect(dx + 28, dy + 15, 4, 2);
+
+        ctx.fillStyle = COL.dkBrown;
+        if (this.state === "throwing" && this.throwAnim > 0.5 && this.throwAnim < 1.5) {
+            ctx.fillRect(dx - 10, dy + 10, 20, 12);
+            ctx.fillRect(dx - 20, dy + 5, 15, 10);
+        } else {
+            const armBob = Math.sin(this.carryAnim) * 2;
+            ctx.fillRect(dx - 5, dy + 20 + armBob, 15, 10);
+            ctx.fillRect(dx + 50, dy + 20 - armBob, 15, 10);
+        }
+
+        ctx.fillStyle = COL.dkDarkBrown;
+        ctx.fillRect(dx + 15, dy + 55, 15, 10);
+        ctx.fillRect(dx + 35, dy + 55, 15, 10);
+
+        if (this.holdingBarrel || (this.state === "idle")) {
+            ctx.fillStyle = COL.barrelBody;
+            ctx.fillRect(dx - 15, dy - 5, 18, 14);
+            ctx.fillStyle = COL.barrelBand;
+            ctx.fillRect(dx - 15, dy + 1, 18, 3);
+        }
+
+        ctx.restore();
+    }
+}
+
+class Barrel {
+    constructor(x, y, dir) {
+        this.x = x; this.y = y;
+        this.w = 16; this.h = 14;
+        this.vx = 0; this.vy = 0;
+        this.dir = dir;
+        this.state = "falling";
+        this.rotation = 0;
+        this.scored = false;
+        this.currentPlatform = null;
+        this.lifetime = 600;
+    }
+
+    update() {
+        this.lifetime--;
+        if (this.lifetime <= 0) { this.state = "dead"; return; }
+
+        if (this.state === "rolling") {
+            const speed = BARREL_BASE_SPEED + Math.abs((this.currentPlatform || {}).slope || 0) * BARREL_ROLL_MULT;
+            this.x += this.dir * speed;
+            if (this.currentPlatform) {
+                this.y = getPlatY(this.currentPlatform, this.x + this.w / 2) - this.h;
+            }
+            this.rotation += this.dir * speed / 8;
+
+            const p = this.currentPlatform;
+            if (p && (this.x + this.w < p.x || this.x > p.x + p.width)) {
+                this.state = "falling";
+                this.vy = 0;
+                this.currentPlatform = null;
+            }
+            if (frameCount % 20 === 0) SFX.barrelRoll();
+        }
+
+        if (this.state === "falling") {
+            this.vy += GRAVITY;
+            if (this.vy > MAX_FALL) this.vy = MAX_FALL;
+            this.y += this.vy;
+
+            for (const p of platforms) {
+                if (p.type === "elevator" && !p.active) continue;
+                const surfY = getPlatY(p, this.x + this.w / 2);
+                const prevBot = this.y + this.h - this.vy;
+                const curBot = this.y + this.h;
+                if (this.x + this.w > p.x && this.x < p.x + p.width) {
+                    if (prevBot <= surfY + 4 && curBot >= surfY - 2 && this.vy >= 0) {
+                        this.y = surfY - this.h;
+                        this.vy = 0;
+                        this.state = "rolling";
+                        this.currentPlatform = p;
+                        this.dir = p.slope > 0 ? 1 : (p.slope < 0 ? -1 : this.dir);
+                        if (p.slope === 0) this.dir = this.x < W / 2 ? 1 : -1;
+                        SFX.land();
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (this.y > H + 50) this.state = "dead";
+
+        if (this.state === "smashed") {
+            this.smashTimer = (this.smashTimer || 0) + 1;
+            if (this.smashTimer > 30) this.state = "dead";
+        }
+    }
+
+    draw() {
+        if (this.state === "dead") return;
+        ctx.save();
+        const dx = Math.round(this.x + this.w / 2);
+        const dy = Math.round(this.y + this.h / 2);
+
+        if (this.state === "smashed") {
+            ctx.globalAlpha = 1 - (this.smashTimer || 0) / 30;
+            addParticle(dx, dy, COL.barrelBody, 0);
+        }
+
+        ctx.translate(dx, dy);
+        ctx.rotate(this.rotation);
+
+        ctx.fillStyle = COL.barrelDark;
+        ctx.fillRect(-this.w / 2, -this.h / 2, this.w, this.h);
+        ctx.fillStyle = COL.barrelBody;
+        ctx.fillRect(-this.w / 2 + 1, -this.h / 2 + 1, this.w - 2, this.h - 2);
+        ctx.fillStyle = COL.barrelHighlight;
+        ctx.fillRect(-this.w / 2 + 2, -this.h / 2 + 2, this.w - 4, 2);
+        ctx.fillStyle = COL.barrelBand;
+        ctx.fillRect(-this.w / 2, -2, this.w, 4);
+
+        ctx.restore();
+    }
+}
+
+class Fireball {
+    constructor(x, y) {
+        this.x = x; this.y = y;
+        this.w = 14; this.h = 14;
+        this.vx = FIREBALL_SPEED;
+        this.vy = 0;
+        this.state = "moving";
+        this.currentPlatform = null;
+        this.onLadder = false;
+        this.currentLadder = null;
+        this.animFrame = 0;
+        this.lifetime = 900;
+        this.lifetime = 900;
+    }
+
+    update() {
+        this.lifetime--;
+        if (this.lifetime <= 0) { this.state = "dead"; return; }
+        this.animFrame = (this.animFrame + 1) % 8;
+
+        if (this.onLadder && this.currentLadder) {
+            this.y -= 1.2;
+            this.x = this.currentLadder.x + this.currentLadder.w / 2 - this.w / 2;
+            if (this.y + this.h <= this.currentLadder.y) {
+                this.onLadder = false;
+                this.currentLadder = null;
+                this.vy = 0;
+                if (player && !player.dead) {
+                    this.vx = player.x > this.x ? FIREBALL_SPEED : -FIREBALL_SPEED;
+                }
+            }
+            return;
+        }
+
+        this.x += this.vx;
+
+        for (const p of platforms) {
+            const surfY = getPlatY(p, this.x + this.w / 2);
+            if (this.x + this.w > p.x && this.x < p.x + p.width) {
+                const prevBot = this.y + this.h - this.vy;
+                const curBot = this.y + this.h;
+                if (prevBot <= surfY + 4 && curBot >= surfY - 2) {
+                    this.y = surfY - this.h;
+                    this.vy = 0;
+                    break;
+                }
+            }
+        }
+
+        this.vy += GRAVITY * 0.5;
+        this.y += this.vy;
+
+        if (!this.onLadder && frameCount % 30 === 0 && Math.random() < 0.4) {
+            for (const lad of ladders) {
+                if (this.x + this.w > lad.x && this.x < lad.x + lad.w) {
+                    const ladBot = lad.y + lad.h;
+                    if (Math.abs(this.y + this.h - ladBot) < 16) {
+                        this.onLadder = true;
+                        this.currentLadder = lad;
+                        this.vy = 0;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (this.x < -20 || this.x > W + 20 || this.y > H + 50) {
+            this.state = "dead";
+        }
+    }
+
+    draw() {
+        if (this.state === "dead") return;
+        ctx.save();
+        const dx = Math.round(this.x);
+        const dy = Math.round(this.y);
+        const flicker = this.animFrame % 4 < 2;
+
+        ctx.fillStyle = flicker ? COL.fireOrange : COL.fireRed;
+        ctx.fillRect(dx + 2, dy + 2, 10, 10);
+        ctx.fillStyle = COL.fireYellow;
+        ctx.fillRect(dx + 4, dy + 4, 6, 6);
+        ctx.fillStyle = flicker ? COL.fireRed : COL.fireOrange;
+        ctx.fillRect(dx, dy + 3, 3, 8);
+        ctx.fillRect(dx + 11, dy + 3, 3, 8);
+        ctx.fillRect(dx + 4, dy, 6, 3);
+        ctx.fillRect(dx + 4, dy + 11, 6, 3);
+
+        ctx.restore();
+    }
+}
+
+class HammerPickup {
+    constructor(x, y) {
+        this.x = x; this.y = y;
+        this.w = 16; this.h = 18;
+        this.collected = false;
+        this.bobAnim = Math.random() * Math.PI * 2;
+    }
+
+    update() {
+        this.bobAnim += 0.05;
+    }
+
+    draw() {
+        if (this.collected) return;
+        const bob = Math.sin(this.bobAnim) * 3;
+        ctx.save();
+        ctx.fillStyle = COL.hammerHandle;
+        ctx.fillRect(this.x + 6, this.y + 4 + bob, 4, 14);
+        ctx.fillStyle = COL.hammerHead;
+        ctx.fillRect(this.x + 2, this.y + bob, 12, 6);
+        ctx.fillStyle = COL.hammerGlow;
+        ctx.fillRect(this.x + 4, this.y + 1 + bob, 8, 2);
+        if (Math.floor(frameCount / 15) % 2 === 0) {
+            ctx.fillStyle = "rgba(136,204,255,0.3)";
+            ctx.fillRect(this.x - 2, this.y - 2 + bob, 20, 22);
+        }
+        ctx.restore();
+    }
+}
+
+class OilDrum {
+    constructor(x, y) {
+        this.x = x; this.y = y;
+        this.w = 24; this.h = 28;
+        this.spawnTimer = 300;
+        this.fireActive = true;
+        this.animFrame = 0;
+    }
+
+    update() {
+        this.animFrame = (this.animFrame + 1) % 60;
+        if (!this.fireActive) return;
+        this.spawnTimer--;
+        if (this.spawnTimer <= 0) {
+            this.spawnTimer = 300 + Math.random() * 200 - currentLevel * 30;
+            if (fireballs.length < 3 + currentLevel) {
+                fireballs.push(new Fireball(this.x + 4, this.y - 14));
+                SFX.fireball();
+            }
+        }
+    }
+
+    draw() {
+        ctx.save();
+        const dx = Math.round(this.x);
+        const dy = Math.round(this.y);
+
+        ctx.fillStyle = COL.oilRim;
+        ctx.fillRect(dx, dy, this.w, 3);
+        ctx.fillRect(dx, dy + this.h - 3, this.w, 3);
+
+        ctx.fillStyle = COL.oilBody;
+        ctx.fillRect(dx + 2, dy + 3, this.w - 4, this.h - 6);
+
+        ctx.fillStyle = COL.oilLabel;
+        ctx.fillRect(dx + 4, dy + 8, this.w - 8, 12);
+
+        ctx.fillStyle = COL.white;
+        ctx.font = "8px monospace";
+        ctx.textAlign = "center";
+        ctx.fillText("OIL", dx + this.w / 2, dy + 18);
+
+        if (this.fireActive && this.spawnTimer < 60) {
+            const fSize = 4 + Math.sin(this.animFrame * 0.3) * 2;
+            ctx.fillStyle = COL.fireOrange;
+            ctx.fillRect(dx + 8, dy - fSize, 8, fSize);
+            ctx.fillStyle = COL.fireYellow;
+            ctx.fillRect(dx + 10, dy - fSize + 2, 4, fSize - 3);
+        }
+        ctx.restore();
+    }
+}
+
+class PaulineChar {
+    constructor(x, y) {
+        this.x = x; this.y = y;
+        this.animFrame = 0;
+        this.helpTimer = 0;
+        this.showHelp = false;
+    }
+
+    update() {
+        this.animFrame = Math.floor(frameCount / 20) % 2;
+        this.helpTimer++;
+        if (this.helpTimer > 120) {
+            this.showHelp = !this.showHelp;
+            this.helpTimer = 0;
+        }
+    }
+
+    draw() {
+        ctx.save();
+        const dx = Math.round(this.x);
+        const dy = Math.round(this.y);
+
+        ctx.fillStyle = COL.paulineHair;
+        ctx.fillRect(dx + 3, dy, 14, 8);
+        ctx.fillRect(dx + 1, dy + 3, 4, 8);
+        ctx.fillRect(dx + 15, dy + 3, 4, 8);
+
+        ctx.fillStyle = COL.marioSkin;
+        ctx.fillRect(dx + 5, dy + 5, 10, 8);
+
+        ctx.fillStyle = "#000";
+        ctx.fillRect(dx + 7, dy + 7, 2, 2);
+        ctx.fillRect(dx + 11, dy + 7, 2, 2);
+
+        ctx.fillStyle = COL.paulinePink;
+        ctx.fillRect(dx + 3, dy + 13, 14, 12);
+
+        ctx.fillStyle = COL.paulineShoe;
+        ctx.fillRect(dx + 3, dy + 25, 6, 3);
+        ctx.fillRect(dx + 11, dy + 25, 6, 3);
+
+        const armBob = this.animFrame === 0 ? 0 : 2;
+        ctx.fillStyle = COL.marioSkin;
+        ctx.fillRect(dx - 2, dy + 14 + armBob, 5, 3);
+        ctx.fillRect(dx + 17, dy + 14 - armBob, 5, 3);
+
+        if (this.showHelp) {
+            ctx.fillStyle = COL.white;
+            ctx.font = "bold 10px monospace";
+            ctx.textAlign = "center";
+            ctx.fillText("HELP!", dx + 8, dy - 8);
+        }
+
+        ctx.restore();
+    }
+}
+
+function spawnBarrel(x, y) {
+    const b = new Barrel(x, y, 1);
+    b.state = "falling";
+    barrels.push(b);
+}
+
+function checkEntityCollisions() {
+    if (!player || player.dead) return;
+    const pb = { x: player.x, y: player.y, w: player.w, h: player.h };
+
+    for (const b of barrels) {
+        if (b.state === "dead" || b.state === "smashed") continue;
+        const bb = { x: b.x, y: b.y, w: b.w, h: b.h };
+        if (aabb(pb, bb)) {
+            if (player.hasHammer) {
+                b.state = "smashed";
+                b.smashTimer = 0;
+                score += 300;
+                SFX.hammerSmash();
+                addFloatingText(b.x, b.y, "300");
+                addParticle(b.x + b.w / 2, b.y + b.h / 2, COL.barrelBody, 8);
+                screenShake = 5;
+            } else {
+                player.die();
+                return;
+            }
+        }
+
+        if (!b.scored && b.state === "rolling") {
+            if (b.x + b.w > player.x && b.x < player.x + player.w) {
+                if (player.y + player.h < b.y + 4 && !player.onGround && player.vy < 0) {
+                    b.scored = true;
+                    score += 100;
+                    SFX.score();
+                    addFloatingText(player.x, player.y - 10, "100");
+                }
+            }
+        }
+    }
+
+    for (const f of fireballs) {
+        if (f.state === "dead") continue;
+        const fb = { x: f.x, y: f.y, w: f.w, h: f.h };
+        if (aabb(pb, fb)) {
+            if (player.hasHammer) {
+                f.state = "dead";
+                score += 200;
+                SFX.hammerSmash();
+                addFloatingText(f.x, f.y, "200");
+                addParticle(f.x + f.w / 2, f.y + f.h / 2, COL.fireOrange, 6);
+            } else {
+                player.die();
+                return;
+            }
+        }
+    }
+
+    for (const h of hammerPickups) {
+        if (h.collected) continue;
+        const hb = { x: h.x, y: h.y, w: h.w, h: h.h };
+        if (aabb(pb, hb)) {
+            h.collected = true;
+            player.hasHammer = true;
+            player.hammerTimer = HAMMER_DURATION;
+            player.hammerAnim = 0;
+            SFX.hammerGrab();
+            addFloatingText(h.x, h.y - 10, "HAMMER!");
+        }
+    }
+
+    if (pauline && !player.climbing) {
+        const paulineBox = { x: pauline.x - 5, y: pauline.y - 5, w: 24, h: 34 };
+        if (aabb(pb, paulineBox)) {
+            winLevel();
+        }
+    }
+}
+
+function winLevel() {
+    gameState = "levelcomplete";
+    transitionTimer = 180;
+    const timeBonus = Math.floor(levelTimer / 60) * 10;
+    score += 500 + timeBonus;
+    SFX.levelComplete();
+    addFloatingText(W / 2 - 40, H / 2 - 40, "LEVEL CLEAR!");
+    addFloatingText(W / 2 - 50, H / 2 - 20, "+500");
+    if (timeBonus > 0) addFloatingText(W / 2 - 50, H / 2, "+" + timeBonus + " TIME");
+    if (score > highScore) {
+        highScore = score;
+        localStorage.setItem("dkHS", highScore.toString());
+    }
+}
+
+function respawnPlayer() {
+    const levelDef = LEVEL_DEFS[currentLevel];
+    player = new Player(levelDef.playerStart.x, levelDef.playerStart.y);
+    player.w = 20; player.h = 28;
+    barrels = [];
+    fireballs = [];
+    invincibleTimer = 120;
+    hammerPickups.forEach(h => { if (!h.collected) h.collected = false; });
+}
+
+const LEVEL_DEFS = [
+    {
+        name: "25m",
+        time: 120,
+        playerStart: { x: 30, y: 540 },
+        dkPos: { x: 30, y: 50 },
+        paulinePos: { x: 100, y: 56 },
+        oilDrumPos: { x: 15, y: 558 },
+        platforms: [
+            { x: 10, y: 80, width: 150, slope: 0, type: "girder" },
+            { x: 0, y: 160, width: 580, slope: 0.025, type: "girder" },
+            { x: 60, y: 250, width: 580, slope: -0.025, type: "girder" },
+            { x: 0, y: 340, width: 580, slope: 0.025, type: "girder" },
+            { x: 60, y: 430, width: 580, slope: -0.025, type: "girder" },
+            { x: 0, y: 520, width: 580, slope: 0.025, type: "girder" },
+            { x: 0, y: 600, width: 640, slope: 0, type: "girder" }
+        ],
+        ladders: [
+            { x: 530, y: 160, w: 18, h: 90 },
+            { x: 80, y: 250, w: 18, h: 90 },
+            { x: 530, y: 340, w: 18, h: 90 },
+            { x: 80, y: 430, w: 18, h: 90 },
+            { x: 530, y: 520, w: 18, h: 80 },
+            { x: 280, y: 250, w: 18, h: 90 },
+            { x: 280, y: 430, w: 18, h: 90 },
+            { x: 400, y: 160, w: 18, h: 90 }
+        ],
+        hammers: [
+            { x: 350, y: 396 }
+        ],
+        barrelInterval: 150
+    },
+    {
+        name: "50m",
+        time: 150,
+        playerStart: { x: 30, y: 540 },
+        dkPos: { x: 30, y: 50 },
+        paulinePos: { x: 100, y: 56 },
+        oilDrumPos: { x: 15, y: 558 },
+        platforms: [
+            { x: 10, y: 80, width: 150, slope: 0, type: "girder" },
+            { x: 0, y: 160, width: 580, slope: -0.025, type: "girder" },
+            { x: 60, y: 245, width: 580, slope: 0.025, type: "girder" },
+            { x: 0, y: 330, width: 580, slope: -0.025, type: "girder" },
+            { x: 60, y: 415, width: 580, slope: 0.025, type: "girder" },
+            { x: 0, y: 500, width: 580, slope: -0.025, type: "girder" },
+            { x: 0, y: 600, width: 640, slope: 0, type: "girder" }
+        ],
+        ladders: [
+            { x: 80, y: 160, w: 18, h: 85 },
+            { x: 530, y: 245, w: 18, h: 85 },
+            { x: 80, y: 330, w: 18, h: 85 },
+            { x: 530, y: 415, w: 18, h: 85 },
+            { x: 80, y: 500, w: 18, h: 100 },
+            { x: 300, y: 160, w: 18, h: 85 },
+            { x: 400, y: 330, w: 18, h: 85 },
+            { x: 200, y: 415, w: 18, h: 85 }
+        ],
+        hammers: [
+            { x: 450, y: 382 },
+            { x: 120, y: 298 }
+        ],
+        barrelInterval: 120
+    },
+    {
+        name: "75m",
+        time: 180,
+        playerStart: { x: 30, y: 560 },
+        dkPos: { x: 30, y: 50 },
+        paulinePos: { x: 100, y: 56 },
+        oilDrumPos: null,
+        platforms: [
+            { x: 10, y: 80, width: 150, slope: 0, type: "girder" },
+            { x: 0, y: 170, width: 580, slope: 0.02, type: "girder" },
+            { x: 60, y: 260, width: 580, slope: -0.02, type: "girder" },
+            { x: 0, y: 350, width: 580, slope: 0.02, type: "girder" },
+            { x: 60, y: 440, width: 580, slope: -0.02, type: "girder" },
+            { x: 0, y: 530, width: 480, slope: 0, type: "elevator", moving: true, moveY: 80, moveSpeed: 0.8, active: true },
+            { x: 0, y: 610, width: 640, slope: 0, type: "girder" }
+        ],
+        ladders: [
+            { x: 530, y: 170, w: 18, h: 90 },
+            { x: 80, y: 260, w: 18, h: 90 },
+            { x: 530, y: 350, w: 18, h: 90 },
+            { x: 80, y: 440, w: 18, h: 90 },
+            { x: 280, y: 260, w: 18, h: 90 },
+            { x: 400, y: 350, w: 18, h: 90 }
+        ],
+        hammers: [
+            { x: 300, y: 316 }
+        ],
+        barrelInterval: 100
+    },
+    {
+        name: "100m",
+        time: 200,
+        playerStart: { x: 30, y: 560 },
+        dkPos: { x: 30, y: 50 },
+        paulinePos: { x: 100, y: 56 },
+        oilDrumPos: { x: 15, y: 588 },
+        platforms: [
+            { x: 10, y: 80, width: 150, slope: 0, type: "girder" },
+            { x: 0, y: 170, width: 580, slope: 0.018, type: "girder" },
+            { x: 60, y: 260, width: 580, slope: -0.018, type: "girder" },
+            { x: 0, y: 350, width: 580, slope: 0.018, type: "girder" },
+            { x: 60, y: 440, width: 580, slope: -0.018, type: "girder" },
+            { x: 0, y: 530, width: 580, slope: 0.018, type: "girder" },
+            { x: 0, y: 620, width: 640, slope: 0, type: "girder" }
+        ],
+        ladders: [
+            { x: 530, y: 170, w: 18, h: 90 },
+            { x: 80, y: 260, w: 18, h: 90 },
+            { x: 530, y: 350, w: 18, h: 90 },
+            { x: 80, y: 440, w: 18, h: 90 },
+            { x: 530, y: 530, w: 18, h: 90 },
+            { x: 200, y: 170, w: 18, h: 90 },
+            { x: 400, y: 350, w: 18, h: 90 },
+            { x: 300, y: 440, w: 18, h: 90 }
+        ],
+        hammers: [
+            { x: 350, y: 496 },
+            { x: 150, y: 316 }
+        ],
+        barrelInterval: 90
+    }
+];
+
+let elevatorUpdateList = [];
+
+function loadLevel(idx) {
+    const ld = LEVEL_DEFS[idx];
+    platforms = ld.platforms.map(p => ({ ...p, origY: p.y, moveOffset: 0, moveDir: 0, moveSpeed: p.moveSpeed || 0 }));
+    ladders = ld.ladders.map(l => ({ ...l }));
+    barrels = [];
+    fireballs = [];
+    particles = [];
+    floatingTexts = [];
+    hammerPickups = ld.hammers.map(h => new HammerPickup(h.x, h.y));
+    oilDrumObj = ld.oilDrumPos ? new OilDrum(ld.oilDrumPos.x, ld.oilDrumPos.y) : null;
+    player = new Player(ld.playerStart.x, ld.playerStart.y);
+    player.w = 20; player.h = 28;
+    dk = new DonkeyKong(ld.dkPos.x, ld.dkPos.y);
+    pauline = new PaulineChar(ld.paulinePos.x, ld.paulinePos.y);
+    levelTimer = ld.time * 60;
+    invincibleTimer = 120;
+    elevatorUpdateList = platforms.filter(p => p.type === "elevator" && p.moving);
+    dk.throwTimer = ld.barrelInterval;
+}
+
+function updateElevators() {
+    for (const p of elevatorUpdateList) {
+        const center = (p.origY + p.origY + (p.moveY || 0)) / 2;
+        const amp = (p.moveY || 0) / 2;
+        p.y = center + Math.sin(frameCount * 0.02 * (p.moveSpeed || 1)) * amp;
+    }
+}
+
+function drawGirderPlatform(p) {
+    const segW = 16;
+    const girderH = 12;
+    const numSegs = Math.ceil(p.width / segW) + 1;
+
+    for (let i = 0; i < numSegs; i++) {
+        const sx = p.x + i * segW;
+        if (sx > p.x + p.width + segW) break;
+        const sy = getPlatY(p, sx + segW / 2);
+
+        ctx.fillStyle = COL.girderBot;
+        ctx.fillRect(sx, sy + girderH - 3, segW, 3);
+        ctx.fillStyle = COL.girderMid;
+        ctx.fillRect(sx + 3, sy + 3, segW - 6, girderH - 6);
+        ctx.fillStyle = COL.girderTop;
+        ctx.fillRect(sx, sy, segW, 3);
+        ctx.fillStyle = COL.girderHighlight;
+        ctx.fillRect(sx, sy, segW, 1);
+    }
+}
+
+function drawConveyorPlatform(p) {
+    const segW = 20;
+    const girderH = 12;
+    const numSegs = Math.ceil(p.width / segW) + 1;
+    const offset = (frameCount * (p.slope > 0 ? 1 : -1) * 2) % segW;
+
+    for (let i = 0; i < numSegs; i++) {
+        const sx = p.x + i * segW;
+        const sy = getPlatY(p, sx + segW / 2);
+
+        ctx.fillStyle = COL.conveyor1;
+        ctx.fillRect(sx, sy, segW, girderH);
+        ctx.fillStyle = COL.conveyor2;
+        ctx.fillRect(sx + 2, sy + 2, segW - 4, girderH - 4);
+        ctx.fillStyle = COL.conveyorArrow;
+        const arrowX = sx + ((offset + i * segW) % segW);
+        ctx.fillRect(sx + segW / 2 - 2, sy + 3, 4, 2);
+        ctx.fillRect(sx + segW / 2 - 4, sy + 5, 8, 2);
+    }
+}
+
+function drawElevatorPlatform(p) {
+    const girderH = 14;
+    ctx.fillStyle = COL.elevatorDark;
+    ctx.fillRect(p.x, p.y, p.width, girderH);
+    ctx.fillStyle = COL.elevatorBody;
+    ctx.fillRect(p.x + 2, p.y + 2, p.width - 4, girderH - 4);
+
+    ctx.fillStyle = COL.elevatorDark;
+    for (let i = 0; i < 4; i++) {
+        ctx.fillRect(p.x + 10 + i * (p.width / 4), p.y + 4, 2, girderH - 8);
+    }
+}
+
+function drawLadder(lad) {
+    ctx.fillStyle = COL.ladderRailDark;
+    ctx.fillRect(lad.x, lad.y, 3, lad.h);
+    ctx.fillRect(lad.x + lad.w - 3, lad.y, 3, lad.h);
+
+    ctx.fillStyle = COL.ladderRail;
+    ctx.fillRect(lad.x + 1, lad.y, 2, lad.h);
+    ctx.fillRect(lad.x + lad.w - 2, lad.y, 2, lad.h);
+
+    const rungSpacing = 14;
+    const numRungs = Math.floor(lad.h / rungSpacing);
+    ctx.fillStyle = COL.ladderRung;
+    for (let i = 0; i <= numRungs; i++) {
+        const ry = lad.y + i * rungSpacing;
+        if (ry <= lad.y + lad.h) {
+            ctx.fillRect(lad.x + 3, ry, lad.w - 6, 2);
+        }
+    }
+}
+
+function drawBackground() {
+    ctx.fillStyle = COL.bg;
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.fillStyle = "#0A0A0A";
+    for (let i = 0; i < 40; i++) {
+        const bx = (i * 67 + 23) % W;
+        const by = (i * 43 + 11) % H;
+        ctx.fillRect(bx, by, 2, 2);
+    }
+}
+
+function drawHUD() {
+    ctx.fillStyle = COL.white;
+    ctx.font = "bold 14px monospace";
+    ctx.textAlign = "left";
+    ctx.fillText("SCORE " + score.toString().padStart(6, "0"), 10, 20);
+    ctx.textAlign = "center";
+    ctx.fillText("L=" + LEVEL_DEFS[currentLevel].name, W / 2, 20);
+    ctx.textAlign = "right";
+    const timeLeft = Math.max(0, Math.floor(levelTimer / 60));
+    ctx.fillStyle = timeLeft < 20 && frameCount % 30 < 15 ? COL.fireRed : COL.white;
+    ctx.fillText("TIME " + timeLeft, W - 10, 20);
+    ctx.textAlign = "left";
+    ctx.fillStyle = COL.white;
+    ctx.fillText("HI " + highScore.toString().padStart(6, "0"), 10, 38);
+
+    ctx.textAlign = "right";
+    for (let i = 0; i < lives; i++) {
+        ctx.fillStyle = COL.marioRed;
+        ctx.fillRect(W - 20 - i * 18, 30, 12, 10);
+        ctx.fillStyle = COL.marioBlue;
+        ctx.fillRect(W - 20 - i * 18, 36, 12, 6);
+    }
+
+    if (player && player.hasHammer) {
+        const pct = player.hammerTimer / HAMMER_DURATION;
+        ctx.fillStyle = "#333";
+        ctx.fillRect(W / 2 - 40, 42, 80, 6);
+        ctx.fillStyle = pct > 0.3 ? COL.hammerHead : COL.fireRed;
+        ctx.fillRect(W / 2 - 40, 42, 80 * pct, 6);
+    }
+}
+
+function drawMenu() {
+    drawBackground();
+
+    ctx.save();
+    const bob = Math.sin(frameCount * 0.03) * 5;
+
+    ctx.fillStyle = COL.dkBrown;
+    ctx.fillRect(W / 2 - 40, 120 + bob, 80, 60);
+    ctx.fillStyle = COL.dkFace;
+    ctx.fillRect(W / 2 - 20, 130 + bob, 40, 25);
+    ctx.fillStyle = "#000";
+    ctx.fillRect(W / 2 - 10, 138 + bob, 6, 6);
+    ctx.fillRect(W / 2 + 4, 138 + bob, 6, 6);
+    ctx.fillStyle = COL.dkFace;
+    ctx.fillRect(W / 2 - 6, 148 + bob, 12, 5);
+
+    ctx.fillStyle = COL.barrelBody;
+    ctx.fillRect(W / 2 - 50, 110 + bob, 16, 14);
+    ctx.fillStyle = COL.barrelBand;
+    ctx.fillRect(W / 2 - 50, 114 + bob, 16, 3);
+
+    ctx.restore();
+
+    ctx.fillStyle = COL.fireRed;
+    ctx.font = "bold 48px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText("DONKEY", W / 2, 240);
+    ctx.fillText("KONG", W / 2, 290);
+
+    ctx.fillStyle = COL.marioRed;
+    ctx.font = "bold 14px monospace";
+    ctx.fillText("A Classic Arcade Clone", W / 2, 320);
+
+    ctx.fillStyle = COL.white;
+    ctx.font = "16px monospace";
+    if (Math.floor(frameCount / 30) % 2 === 0) {
+        ctx.fillText("PRESS ENTER OR TAP TO START", W / 2, 420);
+    }
+
+    ctx.fillStyle = "#888";
+    ctx.font = "12px monospace";
+    ctx.fillText("ARROWS = Move/Climb", W / 2, 480);
+    ctx.fillText("SPACE = Jump", W / 2, 500);
+    ctx.fillText("Z = Use Hammer", W / 2, 520);
+    ctx.fillText("P = Pause", W / 2, 540);
+
+    ctx.fillStyle = COL.scorePop;
+    ctx.fillText("HIGH SCORE: " + highScore, W / 2, 580);
+
+    ctx.fillStyle = COL.marioRed;
+    ctx.fillRect(W / 2 - 10, 610, 20, 16);
+    ctx.fillStyle = COL.marioBlue;
+    ctx.fillRect(W / 2 - 10, 620, 20, 8);
+
+    ctx.fillStyle = COL.white;
+    ctx.font = "10px monospace";
+    ctx.fillText("RESCUE PAULINE FROM DONKEY KONG!", W / 2, 660);
+    ctx.fillText("DODGE BARrels, CLIMb LADDERS,", W / 2, 678);
+    ctx.fillText("GRAB HAMMERS TO SMASH BARRELS!", W / 2, 696);
+}
+
+function drawLevelIntro() {
+    drawBackground();
+    ctx.fillStyle = COL.white;
+    ctx.font = "bold 20px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText("LEVEL " + LEVEL_DEFS[currentLevel].name, W / 2, H / 2 - 30);
+    ctx.font = "14px monospace";
+    ctx.fillText("How High Can You Get?", W / 2, H / 2 + 10);
+
+    ctx.fillStyle = COL.marioRed;
+    ctx.fillRect(W / 2 - 10, H / 2 + 40, 20, 16);
+    ctx.fillStyle = COL.marioBlue;
+    ctx.fillRect(W / 2 - 10, H / 2 + 50, 20, 8);
+}
+
+function drawGameOver() {
+    ctx.fillStyle = "rgba(0,0,0,0.7)";
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.fillStyle = COL.fireRed;
+    ctx.font = "bold 40px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText("GAME OVER", W / 2, H / 2 - 30);
+
+    ctx.fillStyle = COL.white;
+    ctx.font = "18px monospace";
+    ctx.fillText("SCORE: " + score, W / 2, H / 2 + 20);
+    ctx.fillText("HIGH SCORE: " + highScore, W / 2, H / 2 + 50);
+
+    if (Math.floor(frameCount / 30) % 2 === 0) {
+        ctx.font = "14px monospace";
+        ctx.fillText("PRESS ENTER TO CONTINUE", W / 2, H / 2 + 100);
+    }
+}
+
+function drawWinScreen() {
+    ctx.fillStyle = "rgba(0,0,0,0.7)";
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.fillStyle = COL.scorePop;
+    ctx.font = "bold 36px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText("YOU WIN!", W / 2, H / 2 - 50);
+
+    ctx.fillStyle = COL.paulinePink;
+    ctx.font = "20px monospace";
+    ctx.fillText("Pauline is rescued!", W / 2, H / 2);
+
+    ctx.fillStyle = COL.white;
+    ctx.font = "18px monospace";
+    ctx.fillText("FINAL SCORE: " + score, W / 2, H / 2 + 40);
+    ctx.fillText("HIGH SCORE: " + highScore, W / 2, H / 2 + 70);
+
+    if (Math.floor(frameCount / 30) % 2 === 0) {
+        ctx.font = "14px monospace";
+        ctx.fillText("PRESS ENTER TO PLAY AGAIN", W / 2, H / 2 + 130);
+    }
+}
+
+function drawPaused() {
+    ctx.fillStyle = "rgba(0,0,0,0.5)";
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = COL.white;
+    ctx.font = "bold 36px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText("PAUSED", W / 2, H / 2);
+    ctx.font = "14px monospace";
+    ctx.fillText("Press P to resume", W / 2, H / 2 + 40);
+}
+
+function drawLevelComplete() {
+    ctx.fillStyle = "rgba(0,0,0,0.5)";
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = COL.scorePop;
+    ctx.font = "bold 28px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText("LEVEL COMPLETE!", W / 2, H / 2 - 20);
+    ctx.fillStyle = COL.white;
+    ctx.font = "16px monospace";
+    ctx.fillText("SCORE: " + score, W / 2, H / 2 + 20);
+}
+
+let lastTime = 0;
+const FIXED_DT = 1000 / 60;
+let accumulator = 0;
+let pausedState = "";
+
+function gameLoop(timestamp) {
+    const delta = Math.min(timestamp - lastTime, 100);
+    lastTime = timestamp;
+
+    if (gameState === "playing") {
+        accumulator += delta;
+        while (accumulator >= FIXED_DT) {
+            update();
+            accumulator -= FIXED_DT;
+        }
+    }
+
+    draw();
+    requestAnimationFrame(gameLoop);
+}
+
+function update() {
+    frameCount++;
+    soundFrameCounter++;
+
+    if (isKeyJust("KeyP")) {
+        pausedState = gameState;
+        gameState = "paused";
+        return;
+    }
+
+    levelTimer--;
+    if (levelTimer <= 0) {
+        player.die();
+        levelTimer = 0;
+        return;
+    }
+    if (levelTimer % 60 === 0 && levelTimer / 60 <= 20 && levelTimer > 0) {
+        SFX.timeWarning();
+    }
+
+    if (invincibleTimer > 0) invincibleTimer--;
+    if (screenShake > 0) screenShake--;
+
+    dk.update();
+    pauline.update();
+    if (oilDrumObj) oilDrumObj.update();
+
+    for (const h of hammerPickups) h.update();
+
+    for (const b of barrels) b.update();
+    removeDead(barrels, b => b.state !== "dead");
+
+    for (const f of fireballs) f.update();
+    removeDead(fireballs, f => f.state !== "dead");
+
+    player.update();
+    checkEntityCollisions();
+
+    updateElevators();
+
+    for (const p of particles) {
+        p.x += p.vx;
+        p.y += p.vy;
+        p.vy += 0.1;
+        p.life--;
+    }
+    removeDead(particles, p => p.life > 0);
+
+    for (const ft of floatingTexts) {
+        ft.y += ft.vy;
+        ft.life--;
+    }
+    removeDead(floatingTexts, ft => ft.life > 0);
+}
+
+function draw() {
+    ctx.save();
+
+    if (screenShake > 0) {
+        const sx = (Math.random() - 0.5) * screenShake;
+        const sy = (Math.random() - 0.5) * screenShake;
+        ctx.translate(sx, sy);
+    }
+
+    if (gameState === "menu") {
+        drawMenu();
+        ctx.restore();
+        return;
+    }
+
+    if (gameState === "levelintro") {
+        drawLevelIntro();
+        transitionTimer--;
+        if (transitionTimer <= 0) {
+            gameState = "playing";
+        }
+        ctx.restore();
+        return;
+    }
+
+    if (gameState === "paused") {
+        drawGameWorld();
+        drawPaused();
+        ctx.restore();
+        return;
+    }
+
+    if (gameState === "gameover") {
+        drawGameWorld();
+        drawGameOver();
+        if (isKeyJust("Enter") || isKeyJust("Space")) {
+            gameState = "menu";
+            score = 0;
+            lives = 3;
+            currentLevel = 0;
+        }
+        ctx.restore();
+        return;
+    }
+
+    if (gameState === "win") {
+        drawGameWorld();
+        drawWinScreen();
+        if (isKeyJust("Enter") || isKeyJust("Space")) {
+            gameState = "menu";
+            score = 0;
+            lives = 3;
+            currentLevel = 0;
+        }
+        ctx.restore();
+        return;
+    }
+
+    if (gameState === "levelcomplete") {
+        drawGameWorld();
+        drawLevelComplete();
+        transitionTimer--;
+        if (transitionTimer <= 0) {
+            currentLevel++;
+            if (currentLevel >= LEVEL_DEFS.length) {
+                gameState = "win";
+                if (score > highScore) {
+                    highScore = score;
+                    localStorage.setItem("dkHS", highScore.toString());
+                }
+            } else {
+                loadLevel(currentLevel);
+                gameState = "levelintro";
+                transitionTimer = 120;
+            }
+        }
+        ctx.restore();
+        return;
+    }
+
+    drawGameWorld();
+    ctx.restore();
+}
+
+function drawGameWorld() {
+    drawBackground();
+
+    for (const lad of ladders) drawLadder(lad);
+
+    for (const p of platforms) {
+        if (p.type === "conveyor") drawConveyorPlatform(p);
+        else if (p.type === "elevator") drawElevatorPlatform(p);
+        else drawGirderPlatform(p);
+    }
+
+    if (oilDrumObj) oilDrumObj.draw();
+
+    for (const h of hammerPickups) h.draw();
+
+    for (const b of barrels) b.draw();
+
+    for (const f of fireballs) f.draw();
+
+    if (dk) dk.draw();
+    if (pauline) pauline.draw();
+    if (player) player.draw();
+
+    for (const p of particles) {
+        ctx.fillStyle = p.color;
+        ctx.globalAlpha = p.life / 40;
+        ctx.fillRect(p.x, p.y, p.size, p.size);
+    }
+    ctx.globalAlpha = 1;
+
+    for (const ft of floatingTexts) {
+        ctx.fillStyle = ft.color;
+        ctx.globalAlpha = ft.life / 60;
+        ctx.font = "bold 14px monospace";
+        ctx.textAlign = "center";
+        ctx.fillText(ft.text, ft.x, ft.y);
+    }
+    ctx.globalAlpha = 1;
+
+    drawHUD();
+}
+
+function startGame() {
+    ensureAudio();
+    SFX.menuSelect();
+    score = 0;
+    lives = 3;
+    currentLevel = 0;
+    loadLevel(0);
+    gameState = "levelintro";
+    transitionTimer = 120;
+}
+
+window.addEventListener("keydown", e => {
+    if (gameState === "menu" && (e.code === "Enter" || e.code === "Space")) {
+        startGame();
+    }
+    if (gameState === "paused" && e.code === "KeyP") {
+        gameState = pausedState || "playing";
+    }
+});
+
+canvas.addEventListener("click", () => {
+    ensureAudio();
+    if (gameState === "menu") startGame();
+});
+
+canvas.addEventListener("touchstart", e => {
+    ensureAudio();
+    if (gameState === "menu") startGame();
+    if (gameState === "paused") gameState = pausedState || "playing";
+});
+
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>
